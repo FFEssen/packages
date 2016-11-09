@@ -21,6 +21,13 @@ local has_wificlients = false
 
 local seems_dead = false
 
+function lsplit(str)
+  local t = {}
+  local function helper(line) table.insert(t, line) return end
+  helper((str:gsub("(.-)\r?\n", helper)))
+  return t
+end
+
 function time2file (file)
   local f = io.open(file, 'w')
   f:write(string.format('%i', os.time()))
@@ -30,38 +37,40 @@ end
 function matchiface(iface)
   if iface.find(iface, 'wlan[0-9]') then
     return 1
-  if iface.find(iface, 'client[0-9]') then
+  elseif iface.find(iface, 'client[0-9]') then
     return 2
   elseif iface.find(iface, 'mesh[0-9]') then
     return 3
   elseif iface.find(iface, 'ibss[0-9]') then
     return 4
   else
-    return false
+    return 0 
   end
 end
 
 function get_ath9k_ifaces() 
   local ifaces = {}
   local devs = {}
-  p = io.open("ls /sys/class/net/")
-  for iface in p:lines() do
-    is_ath9k = tonumber(io.open('expr "$(readlink /sys/class/net/' .. iface .. '/device/driver)" : ".*/ath9k" >/dev/null'):read("*n"))
-    if is_ath9k != 0 then
+  local paths = {}
+  local is_ath9k
+  local p = lsplit(io.popen("ls /sys/class/net/" , "r"):read("*all"))
+  p[#p]=nil
+  for k, iface in pairs(p) do
+    if os.execute('expr "$(readlink /sys/class/net/' .. iface .. '/device/driver)" : ".*/ath9k" >/dev/null') == 0 then
       table.insert(ifaces, iface)
       if matchiface(iface) > 1 then
         uci:foreach('wireless', 'wifi-iface',
           function(s)
             if s['ifname'] == iface then
               table.insert(devs, s['device'])
+              table.insert(paths, s['.name'])
             end
           end
         )
       end
     end
   end
-  p:close()
-  return {devs, ifaces}
+  return {devs, ifaces, paths}
 end
 
 
@@ -82,26 +91,43 @@ function devOk (iface)
   return false
 end
 
+
 -- Has wifi? -> (no) Abort!
+
 if tonumber(io.popen("ls -l /sys/class/ieee80211/phy* | wc -l"):read("*n")) == 0 then 
+  print("No radio at all detected. Aborting...")
   os.exit(0)
 end
 
 -- Minimum uptime? (no) Abort!
+
 if tonumber(fs.readfile('/proc/uptime'):match('^([^ ]+) ')) < min_uptime_secs then
+  print("Minimum uptime not reached. Aborting...")
   os.exit(0)
 end
 
 -- Autoupdater running? -> (yes) Abort!
+
 if os.execute("pgrep autoupdater > /dev/null") == 0 then
+  print("Autoupdater running. Aborting...")
   os.exit(0)
 end
 
+-- Wifi-fallback-updater running? -> (yes) Abort!
+if os.execute("pgrep autoupdater-wifi-fallback > /dev/null") == 0 then                                                              
+  print("Wifi Autoupdater running. Aborting...")                                                                           
+  os.exit(0)                                                                                                          
+end   
+
 -- Does the device have ath9k-chips? -> (no) Abort!
-devs=get_ath9k_ifaces()
-ifaces=devs[1]
-devs=devs[0]
+
+ds = get_ath9k_ifaces()
+ifaces = ds[2]
+devs = ds[1]
+paths=ds[3]
+
 if #ifaces == 0 or #devs == 0 then
+  print("No ath9k chipset detected. Aborting...")
   os.exit(0)
 end
 
@@ -110,14 +136,16 @@ for k, iface in pairs(ifaces) do
   if matchiface(iface) > 2 then
     if tonumber(io.popen('batctl o | egrep "' .. iface .. '" | wc -l'):read("*n")) > 0 then
       has_wifimesh = true
+      print("Wifimesh: true [" .. iface .. "]")
       time2file(fileMe)
     end
   end
 end
 
 -- Has batman clients?
-if tonumber(io.popen("batctl tl | grep W | wc -l"):read("*n") > 0 then
+if tonumber(io.popen('batctl tl | grep W | wc -l'):read("*n")) > 0 then
   has_batclients = true
+  print("batclients: true")
   time2file(fileBa)
 end
 
@@ -125,8 +153,9 @@ end
 -- Any private wifi clients?
 for k, iface in pairs(ifaces) do
   if matchiface(iface) == 1 then
-    if devOk(iface) != false then
+    if devOk(paths[k]) ~= false then
       has_privclients = true
+      print("privclients: true [" .. iface .. "]")
       time2file(filePr)
     end
   end
@@ -135,8 +164,9 @@ end
 -- Any public wifi clients?
 for k, iface in pairs(ifaces) do
   if matchiface(iface) == 2 then
-    if devOk(iface) != false then
+    if devOk(paths[k]) ~= false then
       has_wificlients = true
+      print("pubwifi:true [" .. iface .. "]")
       time2file(fileCl)
     end
   end
@@ -144,9 +174,15 @@ end
 
 -- Gateway reachable?
 gateway = tostring(io.popen('batctl gwl | grep "^=>" | awk -F\'[ ]\' \'{print $2}\''):read("*all"))
-if gateway != "" then
-  if os.execute('batctl ping -c 3 ' .. gateway .. ' >/dev/null 2>&1') == 0 then
+if gateway ~= "" then
+  p=lsplit(io.popen('batctl ping -c 3 ' .. gateway):read("*all"))
+  print(p[#p])
+  p[#p]=nil
+  p[#p]=nil
+
+  if not p[#p].find(p[#p], "ved, 100") then
     has_gateway=true
+    print("gateway: true")
     time2file(fileGw)
   end
 end
@@ -154,10 +190,12 @@ end
 if not has_wifimesh and not has_privclients and not has_batclients and not has_wificlients then
   if fs.readfile(fileMe) or fs.readfile(fileBa) or fs.readfile(filePr) or fs.readfile(fileCl) then
     seems_dead = true
+    print("seemsdead1")
   end
 end
 
 if not has_gateway and fs.readfile(fileGw) then
+  print("seemsdead2")
   seems_dead = true
 end
 
@@ -167,6 +205,7 @@ if not fs.readfile(fileReset) then
 end
 
 if not seems_dead or not fs.readfile(fileOk) then 
+  print("Everything seems fine. Exiting...")
   time2file(fileOk)
   os.exit(0)                             
 end
@@ -175,13 +214,16 @@ local blackout_wait_secs = site.ath9k-workaround.blackout_wait *60
 local reset_wait_secs = site.ath9k-workaround.reset_wait *60
 
 if os.difftime(os.time(), tonumber(fs.readfile(fileReset))) <= reset_wait_secs then
+  print("1-" .. tostring(reset_wait_secs-os.difftime(os.time(), tonumber(fs.readfile(fileReset)))))
   os.exit(0)
 end
 
 if os.difftime(os.time(), tonumber(fs.readfile(fileOk))) <= blackout_wait_secs then
+  print("2-" .. tostring(blackout_wait_secs-os.difftime(os.time(), tonumber(fs.readfile(fileOk)))))
   os.exit(0)
 end
 
+print("Blackout detected. Restarting wifi...")
 io.popen('logger -s -t ath9k-blackout-workaround -p local0.info "blackout detected, restarting wifi"')
 time2file(fileReset)
 os.remove(fileGw)
@@ -190,3 +232,4 @@ os.remove(fileBa)
 os.remove(filePr)
 os.remove(fileMe)
 os.execute("wifi")
+print("Successful. Exiting...")
