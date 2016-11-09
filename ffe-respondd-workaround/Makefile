@@ -33,7 +33,6 @@ define Build/Compile
 endef
 
 define Package/ffe-respondd-workaround/install
-	$(CP) ./files/* $(1)/
 	$(CP) $(PKG_BUILD_DIR)/luadest/* $(1)/
 endef
 
