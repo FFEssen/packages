@@ -4,14 +4,66 @@ local uci = require('luci.model.uci').cursor()
 local iwinfo = require "iwinfo"
 local site = require 'gluon.site_config'
 
+local min_uptime_secs = 600
 local fileOk="/tmp/ath9k-ok"
 local fileReset="/tmp/ath9k-reset"
+local fileGw="/tmp/ath9k-gw" -- Gateway connection
+local fileMe="/tmp/ath9k-me" -- Mesh connection
+local filePr="/tmp/ath9k-pr" -- Private wifi connection
+local fileBa="/tmp/ath9k-ba" -- Batman clients
+local fileCl="/tmp/ath9k-cl" -- Client connection
+
+local has_wifimesh = false
+local has_privclients = false
+local has_gateway = false
+local has_batclients = false
+local has_wificlients = false
+
+local seems_dead = false
 
 function time2file (file)
   local f = io.open(file, 'w')
   f:write(string.format('%i', os.time()))
   f:close()
 end
+
+function matchiface(iface)
+  if iface.find(iface, 'wlan[0-9]') then
+    return 1
+  if iface.find(iface, 'client[0-9]') then
+    return 2
+  elseif iface.find(iface, 'mesh[0-9]') then
+    return 3
+  elseif iface.find(iface, 'ibss[0-9]') then
+    return 4
+  else
+    return false
+  end
+end
+
+function get_ath9k_ifaces() 
+  local ifaces = {}
+  local devs = {}
+  p = io.open("ls /sys/class/net/")
+  for iface in p:lines() do
+    is_ath9k = tonumber(io.open('expr "$(readlink /sys/class/net/' .. iface .. '/device/driver)" : ".*/ath9k" >/dev/null'):read("*n"))
+    if is_ath9k != 0 then
+      table.insert(ifaces, iface)
+      if matchiface(iface) > 1 then
+        uci:foreach('wireless', 'wifi-iface',
+          function(s)
+            if s['ifname'] == iface then
+              table.insert(devs, s['device'])
+            end
+          end
+        )
+      end
+    end
+  end
+  p:close()
+  return {devs, ifaces}
+end
+
 
 function devOk (iface)
   local data = uci:get_all('wireless', iface)
@@ -30,30 +82,91 @@ function devOk (iface)
   return false
 end
 
-function check_wifi()
-  local ifaces = {}
-  uci:foreach('wireless', 'wifi-iface',
-    function(s)
-      table.insert(ifaces, s['.name'])
-    end
-  )
-  local blackout = false
-  for _, iface in ipairs(ifaces) do
-    local tmp = devOk(iface)
-    if tmp then
-      return true
-    elseif tmp == false then
-      blackout = true
+-- Has wifi? -> (no) Abort!
+if tonumber(io.popen("ls -l /sys/class/ieee80211/phy* | wc -l"):read("*n")) == 0 then 
+  os.exit(0)
+end
+
+-- Minimum uptime? (no) Abort!
+if tonumber(fs.readfile('/proc/uptime'):match('^([^ ]+) ')) < min_uptime_secs then
+  os.exit(0)
+end
+
+-- Autoupdater running? -> (yes) Abort!
+if os.execute("pgrep autoupdater > /dev/null") == 0 then
+  os.exit(0)
+end
+
+-- Does the device have ath9k-chips? -> (no) Abort!
+devs=get_ath9k_ifaces()
+ifaces=devs[1]
+devs=devs[0]
+if #ifaces == 0 or #devs == 0 then
+  os.exit(0)
+end
+
+-- Wireless mesh connection?
+for k, iface in pairs(ifaces) do
+  if matchiface(iface) > 2 then
+    if tonumber(io.popen('batctl o | egrep "' .. iface .. '" | wc -l'):read("*n")) > 0 then
+      has_wifimesh = true
+      time2file(fileMe)
     end
   end
-  return not blackout
 end
+
+-- Has batman clients?
+if tonumber(io.popen("batctl tl | grep W | wc -l"):read("*n") > 0 then
+  has_batclients = true
+  time2file(fileBa)
+end
+
+-- notice: actually this can't work properly :D
+-- Any private wifi clients?
+for k, iface in pairs(ifaces) do
+  if matchiface(iface) == 1 then
+    if devOk(iface) != false then
+      has_privclients = true
+      time2file(filePr)
+    end
+  end
+end
+
+-- Any public wifi clients?
+for k, iface in pairs(ifaces) do
+  if matchiface(iface) == 2 then
+    if devOk(iface) != false then
+      has_wificlients = true
+      time2file(fileCl)
+    end
+  end
+end
+
+-- Gateway reachable?
+gateway = tostring(io.popen('batctl gwl | grep "^=>" | awk -F\'[ ]\' \'{print $2}\''):read("*all"))
+if gateway != "" then
+  if os.execute('batctl ping -c 3 ' .. gateway .. ' >/dev/null 2>&1') == 0 then
+    has_gateway=true
+    time2file(fileGw)
+  end
+end
+
+if not has_wifimesh and not has_privclients and not has_batclients and not has_wificlients then
+  if fs.readfile(fileMe) or fs.readfile(fileBa) or fs.readfile(filePr) or fs.readfile(fileCl) then
+    seems_dead = true
+  end
+end
+
+if not has_gateway and fs.readfile(fileGw) then
+  seems_dead = true
+end
+
 
 if not fs.readfile(fileReset) then
   time2file(fileReset)
 end
 
-if check_wifi() or not fs.readfile(fileOk) then 
+if not seems_dead or not fs.readfile(fileOk) then 
   time2file(fileOk)
   os.exit(0)                             
 end
@@ -69,6 +182,11 @@ if os.difftime(os.time(), tonumber(fs.readfile(fileOk))) <= blackout_wait_secs t
   os.exit(0)
 end
 
-io.popen('logger -s -t ath9k-blackout-workaround -p local0.info "blackout detected, resart wifi"')
+io.popen('logger -s -t ath9k-blackout-workaround -p local0.info "blackout detected, restarting wifi"')
 time2file(fileReset)
+os.remove(fileGw)
+os.remove(fileCl)
+os.remove(fileBa)
+os.remove(filePr)
+os.remove(fileMe)
 os.execute("wifi")
