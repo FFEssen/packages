@@ -231,5 +231,21 @@ os.remove(fileCl)
 os.remove(fileBa)
 os.remove(filePr)
 os.remove(fileMe)
-io.popen("wifi")
-print("Successful. Exiting...")
+os.execute("wifi")
+print("Successful.")
+
+if os.difftime(os.time(), tonumber(fs.readfile(fileOk))) <= (blackout_wait_secs * 8) then
+  print("3-" .. tostring(blackout_wait_secs-os.difftime(os.time(), tonumber(fs.readfile(fileOk)))))
+  os.exit(0)
+end
+
+print("Restarting network...")
+io.popen("/etc/init.d/network restart")
+
+if os.difftime(os.time(), tonumber(fs.readfile(fileOk))) <= (blackout_wait_secs * 128) then
+  print("4-" .. tostring(blackout_wait_secs-os.difftime(os.time(), tonumber(fs.readfile(fileOk)))))
+  os.exit(0)
+end
+print("Rebooting...")
+io.popen("reboot")
+os.execute("reboot")
