@@ -187,15 +187,22 @@ if gateway ~= "" then
   end
 end
 
-if not has_wifimesh and not has_privclients and not has_batclients and not has_wificlients then
-  if fs.readfile(fileMe) or fs.readfile(fileBa) or fs.readfile(filePr) or fs.readfile(fileCl) then
+if not has_wifimesh and not has_privclients and not has_wificlients then
+  if fs.readfile(fileMe) or fs.readfile(filePr) or fs.readfile(fileCl) then
     seems_dead = true
     print("seemsdead1")
   end
 end
 
+if (not has_batclients and has_wificlients) or (has_batclients and not has_wificlients) then
+  if fs.readfile(fileMe) or fs.readfile(fileBa) or fs.readfile(filePr) or fs.readfile(fileCl) then
+    seems_dead = true
+    print("seemsdead2")
+  end
+end
+
 if not has_gateway and fs.readfile(fileGw) then
-  print("seemsdead2")
+  print("seemsdead3")
   seems_dead = true
 end
 
