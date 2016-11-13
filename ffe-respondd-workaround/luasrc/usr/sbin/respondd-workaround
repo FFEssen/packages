@@ -7,6 +7,6 @@ local min_uptime_secs = 600
 
 if os.execute("pgrep respondd") ~= 0 and tonumber(fs.readfile('/proc/uptime'):match('^([^ ]+) ')) > min_uptime_secs then 
   io.popen('logger -s -t respondd-workaround -p local0.info "failure detected. restarting respondd..."')
-  os.execute("/etc/init.d/gluon-respondd start")                    
+  io.popen("/etc/init.d/gluon-respondd start")                    
 end
 
