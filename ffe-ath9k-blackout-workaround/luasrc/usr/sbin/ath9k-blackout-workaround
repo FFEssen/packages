@@ -246,6 +246,8 @@ if os.difftime(os.time(), tonumber(fs.readfile(fileOk))) <= (blackout_wait_secs 
   print("4-" .. tostring(blackout_wait_secs-os.difftime(os.time(), tonumber(fs.readfile(fileOk)))))
   os.exit(0)
 end
-print("Rebooting...")
+print("Rebooting in 30 seconds...")
+os.remove(fileOk)
+os.execute("sleep 30")
 io.popen("reboot")
 os.execute("reboot")
