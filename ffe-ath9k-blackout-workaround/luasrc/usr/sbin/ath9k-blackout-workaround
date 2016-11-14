@@ -57,13 +57,13 @@ function get_ath9k_ifaces()
   p[#p]=nil
   for k, iface in pairs(p) do
     if os.execute('expr "$(readlink /sys/class/net/' .. iface .. '/device/driver)" : ".*/ath9k" >/dev/null') == 0 then
-      table.insert(ifaces, iface)
       if matchiface(iface) > 1 then
         uci:foreach('wireless', 'wifi-iface',
           function(s)
             if s['ifname'] == iface then
               table.insert(devs, s['device'])
               table.insert(paths, s['.name'])
+              table.insert(ifaces, iface)
             end
           end
         )
@@ -76,17 +76,19 @@ end
 
 function devOk (iface)
   local data = uci:get_all('wireless', iface)
-  if data.disabled then
+  if data.disabled == 1 then
     return null
   end
-  local radio = uci:get_all('wireless', data.radio)
-  if not radio.hwmode == '11g' or radio.disabled then
+  local radio = uci:get_all('wireless', data.device)
+  if not radio.hwmode == '11g' or radio.disabled == 1 then
     return null
   end
-  local wifitype = iwinfo.type(data.radio)
-  local iw = iwinfo[wifitype]
-  if iw.assoclist(iface) then
-    return true
+  local wifitype = iwinfo.type(data.device)
+  local iw = iwinfo[wifitype].assoclist(iface)
+  if iw then
+    if #iw > 0 then
+      return true
+    end
   end
   return false
 end
