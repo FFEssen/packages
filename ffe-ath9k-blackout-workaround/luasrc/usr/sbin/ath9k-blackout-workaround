@@ -4,9 +4,15 @@ local uci = require('luci.model.uci').cursor()
 local iwinfo = require "iwinfo"
 local site = require 'gluon.site_config'
 
-local min_uptime_secs = 600
+local min_uptime_secs = site.ath9k_workaround.uptime_wait*60
+local blackout_wait_secs = site.ath9k_workaround.blackout_wait *60
+local reset_wait_secs = site.ath9k_workaround.reset_wait *60
+local reboot_wait_secs = site.ath9k_workaround.reboot_wait *60
+local network_wait_secs = site.ath9k_workaround.network_wait *60
+
 local fileOk="/tmp/ath9k-ok"
 local fileReset="/tmp/ath9k-reset"
+local fileNetwork="/tmp/ath9k-reset-network"
 local fileGw="/tmp/ath9k-gw" -- Gateway connection
 local fileMe="/tmp/ath9k-me" -- Mesh connection
 local filePr="/tmp/ath9k-pr" -- Private wifi connection
@@ -14,14 +20,15 @@ local fileBa="/tmp/ath9k-ba" -- Batman clients
 local fileCl="/tmp/ath9k-cl" -- Client connection
 
 local has_wifimesh = false
+local has_wificlients = false
+local has_batclients = false
 local has_privclients = false
 local has_gateway = false
-local has_batclients = false
-local has_wificlients = false
 
 local seems_dead = false
 
 function lsplit(str)
+-- Just splits lines of string into a list
   local t = {}
   local function helper(line) table.insert(t, line) return end
   helper((str:gsub("(.-)\r?\n", helper)))
@@ -29,6 +36,7 @@ function lsplit(str)
 end
 
 function time2file (file)
+-- Writes unix timestamp to file
   local f = io.open(file, 'w')
   f:write(string.format('%i', os.time()))
   f:close()
@@ -44,6 +52,7 @@ function matchiface(iface)
   elseif iface.find(iface, 'ibss[0-9]') then
     return 4
   else
+    -- unknown interface we don't care about
     return 0 
   end
 end
@@ -57,6 +66,7 @@ function get_ath9k_ifaces()
   p[#p]=nil
   for k, iface in pairs(p) do
     if os.execute('expr "$(readlink /sys/class/net/' .. iface .. '/device/driver)" : ".*/ath9k" >/dev/null') == 0 then
+      -- we don't care if there is only a private wifi
       if matchiface(iface) > 1 then
         uci:foreach('wireless', 'wifi-iface',
           function(s)
@@ -95,39 +105,34 @@ end
 
 
 -- Has wifi? -> (no) Abort!
-
 if tonumber(io.popen("ls -l /sys/class/ieee80211/phy* | wc -l"):read("*n")) == 0 then 
   print("No radio at all detected. Aborting...")
   os.exit(0)
 end
 
 -- Minimum uptime? (no) Abort!
-
 if tonumber(fs.readfile('/proc/uptime'):match('^([^ ]+) ')) < min_uptime_secs then
   print("Minimum uptime not reached. Aborting...")
   os.exit(0)
 end
 
 -- Autoupdater running? -> (yes) Abort!
-
 if os.execute("pgrep autoupdater > /dev/null") == 0 then
   print("Autoupdater running. Aborting...")
   os.exit(0)
 end
 
 -- Wifi-fallback-updater running? -> (yes) Abort!
-if os.execute("pgrep autoupdater-wifi-fallback > /dev/null") == 0 then                                                              
-  print("Wifi Autoupdater running. Aborting...")                                                                           
+if os.execute("pgrep autoupdater-wifi-fallback > /dev/null") == 0 then       
+  print("Wifi Autoupdater running. Aborting...")
   os.exit(0)                                                                                                          
 end   
 
 -- Does the device have ath9k-chips? -> (no) Abort!
-
-ds = get_ath9k_ifaces()
-ifaces = ds[2]
-devs = ds[1]
-paths=ds[3]
-
+local ds = get_ath9k_ifaces()
+local ifaces = ds[2]
+local devs = ds[1]
+local paths=ds[3]
 if #ifaces == 0 or #devs == 0 then
   print("No ath9k chipset detected. Aborting...")
   os.exit(0)
@@ -175,7 +180,7 @@ for k, iface in pairs(ifaces) do
 end
 
 -- Gateway reachable?
-gateway = tostring(io.popen('batctl gwl | grep "^=>" | awk -F\'[ ]\' \'{print $2}\''):read("*all"))
+local gateway = tostring(io.popen('batctl gwl | grep "^=>" | awk -F\'[ ]\' \'{print $2}\''):read("*all"))
 if gateway ~= "" then
   p=lsplit(io.popen('batctl ping -c 3 ' .. gateway):read("*all"))
   print(p[#p])
@@ -192,19 +197,23 @@ end
 if not has_wifimesh and not has_privclients and not has_wificlients then
   if fs.readfile(fileMe) or fs.readfile(filePr) or fs.readfile(fileCl) then
     seems_dead = true
-    print("seemsdead1")
+    print("seemsdead-1")
   end
 end
 
 if (not has_batclients and has_wificlients) or (has_batclients and not has_wificlients) then
-  if fs.readfile(fileMe) or fs.readfile(fileBa) or fs.readfile(filePr) or fs.readfile(fileCl) then
+  if fs.readfile(fileCl) and fs.readfile(fileBa) then
     seems_dead = true
-    print("seemsdead2")
+    print("seemsdead-2")
   end
 end
 
 if not has_gateway and fs.readfile(fileGw) then
-  print("seemsdead3")
+-- always assume that there is a defect if there is no connection to gateways 
+-- so that if somehow (highly unlikely) wifi directly fails after a reboot (mind tmp-files will be resetted) 
+-- and node has no own internet connection it will still be fixed
+-- another scenario could be that 5 GHz is working but 2.4 isn't or the other way round
+  print("seemsdead-3")
   seems_dead = true
 end
 
@@ -213,25 +222,29 @@ if not fs.readfile(fileReset) then
   time2file(fileReset)
 end
 
-if not seems_dead or not fs.readfile(fileOk) then 
+if not fs.readfile(fileOk) then
+  time2file(fileOk)
+end
+
+if not fs.readfile(fileNetwork) then
+  time2file(fileNetwork)
+end
+
+if not seems_dead then 
   print("Everything seems fine. Exiting...")
   time2file(fileOk)
   os.exit(0)                             
 end
 
-local blackout_wait_secs = site.ath9k_workaround.blackout_wait *60
-local reset_wait_secs = site.ath9k_workaround.reset_wait *60
-
 if os.difftime(os.time(), tonumber(fs.readfile(fileReset))) <= reset_wait_secs then
-  print("1-" .. tostring(reset_wait_secs-os.difftime(os.time(), tonumber(fs.readfile(fileReset)))))
+  print("exit-1")
   os.exit(0)
 end
 
 if os.difftime(os.time(), tonumber(fs.readfile(fileOk))) <= blackout_wait_secs then
-  print("2-" .. tostring(blackout_wait_secs-os.difftime(os.time(), tonumber(fs.readfile(fileOk)))))
+  print("exit-2")
   os.exit(0)
 end
-
 print("Blackout detected. Restarting wifi...")
 io.popen('logger -s -t ath9k-blackout-workaround -p local0.info "blackout detected, restarting wifi"')
 time2file(fileReset)
@@ -241,22 +254,23 @@ os.remove(fileBa)
 os.remove(filePr)
 os.remove(fileMe)
 os.execute("wifi")
-print("Successful.")
 
-if os.difftime(os.time(), tonumber(fs.readfile(fileOk))) <= (blackout_wait_secs * 8) then
-  print("3-" .. tostring(blackout_wait_secs-os.difftime(os.time(), tonumber(fs.readfile(fileOk)))))
+if os.difftime(os.time(), tonumber(fs.readfile(fileNetwork))) <= network_wait_secs then
+  print("exit-3")
   os.exit(0)
 end
-
-print("Restarting network...")
+io.popen('logger -s -t ath9k-blackout-workaround -p local0.info "blackout detected, restarting network"')
+print("Restarting network in 3 seconds...")
+os.execute("sleep 3")
 io.popen("/etc/init.d/network restart")
+time2file(fileNetwork)
 
-if os.difftime(os.time(), tonumber(fs.readfile(fileOk))) <= (blackout_wait_secs * 128) then
-  print("4-" .. tostring(blackout_wait_secs-os.difftime(os.time(), tonumber(fs.readfile(fileOk)))))
+if os.difftime(os.time(), tonumber(fs.readfile(fileOk))) <= reboot_wait_secs then
   os.exit(0)
+  print("exit-4")
 end
 print("Rebooting in 30 seconds...")
-os.remove(fileOk)
+io.popen('logger -s -t ath9k-blackout-workaround -p local0.info "blackout detected, rebooting"')
 os.execute("sleep 30")
 io.popen("reboot")
 os.execute("reboot")
