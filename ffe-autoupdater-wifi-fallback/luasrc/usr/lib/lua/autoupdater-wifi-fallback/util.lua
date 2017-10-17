@@ -1,31 +1,33 @@
 #!/usr/bin/lua
-local uci = require('luci.model.uci').cursor()
-local iwinfo = require "iwinfo"
+local uci = require('simple-uci').cursor()
+local iwinfo = require 'iwinfo'
 
 function get_available_wifi_networks()
   local radios = {}
 
   uci:foreach('wireless', 'wifi-device',
     function(s)
-      table.insert(radios, s['.name'])
+      radios[s['.name']] = {}
     end
   )
-  for _, radio in ipairs(radios) do
+
+  for radio, _ in pairs(radios) do
     local wifitype = iwinfo.type(radio)
     local iw = iwinfo[wifitype]
-    if iw then
-      local list = iw.scanlist(radio)
-      for _, net in ipairs(list) do
-        if net.ssid and net.bssid then
-          if net.ssid:match('.*[Ff][Rr][Ee][Ii][Ff][Uu][Nn][Kk].*') then
-            return radio, net.ssid, net.bssid
-          end
+    if not iw then
+      return null
+	end
+    local tmplist = iw.scanlist(radio)
+    for _, net in ipairs(tmplist) do
+      if net.ssid and net.bssid then
+        if net.ssid:match('.*[Ff][Rr][Ee][Ii][Ff][Uu][Nn][Kk].*') then
+          table.insert (radios[radio], net)
         end
       end
     end
   end
 
-  return false
+  return radios
 end
 
 function get_update_hosts(branch)
@@ -33,7 +35,7 @@ function get_update_hosts(branch)
   local mirrors = uci:get_list('autoupdater', branch, 'mirror')
 
   for _, mirror in ipairs(mirrors) do
-    local host = mirror:match("://%[?([a-zA-Z0-9\:\.]+)%]?/")
+    local host = mirror:match('://%[?([a-zA-Z0-9\:\.]+)%]?/')
     table.insert(hosts, 1, host)
   end
   return hosts
