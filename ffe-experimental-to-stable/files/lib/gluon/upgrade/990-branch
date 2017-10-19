@@ -1,0 +1,9 @@
+#!/bin/sh
+#
+# this script switches the node's autoupdater branch setting to stable,
+#  if the branch is experimental.
+#
+
+if [ "$(uci get autoupdater.settings.branch)" == experimental ]; then
+	uci set autoupdater.settings.branch='stable'
+fi
